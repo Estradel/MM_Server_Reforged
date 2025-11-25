@@ -32,9 +32,18 @@ class FastGLTF(SkeletonAnimation):
         rest_rotations = np.zeros((num_bones, 4), dtype=np.float32)
         rest_scales = np.ones((num_bones, 3), dtype=np.float32)
 
+        self.rest_positions = np.zeros((num_bones, 3), dtype=np.float32)
+        self.rest_rotations = np.zeros((num_bones, 4), dtype=np.float32)
+        self.rest_scales = np.ones((num_bones, 3), dtype=np.float32)
+
         for internal_i, gltf_node_idx in enumerate(joint_indices):
             node = gltf.nodes[gltf_node_idx]
             self.bone_names.append(node.name or f"Bone_{internal_i}")
+
+            if node.translation: self.rest_positions[internal_i] = node.translation
+            if node.rotation: self.rest_rotations[internal_i] = node.rotation
+            else: self.rest_rotations[internal_i] = [0, 0, 0, 1]
+            if node.scale: self.rest_scales[internal_i] = node.scale
 
             if node.translation: rest_positions[internal_i] = node.translation
             if node.rotation: rest_rotations[internal_i] = node.rotation

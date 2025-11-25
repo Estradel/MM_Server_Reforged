@@ -1,4 +1,6 @@
 import numpy as np
+from numpy._typing import NDArray
+
 
 class SkeletonAnimation:
     """
@@ -6,7 +8,13 @@ class SkeletonAnimation:
     """
     def __init__(self):
         self.bone_names : list[str] = []
-        self.bone_parents = []    # np.array int32
+        self.bone_parents : NDArray[np.int32] = np.empty((0,), dtype=np.int32)  # np.array int32
+
+        # --- Ajout : Stockage de la Bind Pose (Pose de repos) ---
+        # Ces données définissent la forme du squelette sans animation
+        self.rest_positions = None # (B, 3)
+        self.rest_rotations = None # (B, 4) - Quaternions
+        self.rest_scales = None    # (B, 3)
 
         # Données d'animation (Frames, Bones, ...)
         self.local_positions = None # (F, B, 3)
@@ -24,6 +32,33 @@ class SkeletonAnimation:
     @property
     def duration(self):
         return max(0, self.num_frames - 1) * self.frame_time
+
+    def get_skeleton_definition(self) -> dict:
+        """
+        Génère un dictionnaire contenant la structure statique du squelette.
+        Idéal pour être envoyé en JSON au client lors de l'initialisation.
+        """
+        # Conversion des tableaux NumPy en listes pour la sérialisation JSON
+        parents_list : list[int] = self.bone_parents.tolist()
+
+        # Préparation de la bind pose (si disponible, sinon identité)
+        num_bones = len(self.bone_names)
+
+        # Valeurs par défaut si les loaders n'ont pas rempli les rest_xxx
+        r_pos = self.rest_positions.tolist() if self.rest_positions is not None else [[0,0,0]] * num_bones
+        r_rot = self.rest_rotations.tolist() if self.rest_rotations is not None else [[0,0,0,1]] * num_bones
+        r_scl = self.rest_scales.tolist()    if self.rest_scales is not None    else [[1,1,1]] * num_bones
+
+        return {
+            "type": "SKELETON_DEF",
+            "bone_names": self.bone_names,
+            "parents": parents_list,
+            "bind_pose": {
+                "positions": r_pos,
+                "rotations": r_rot,
+                "scales": r_scl
+            }
+        }
 
     def get_pose_at_time(self, time_sec, loop=True):
         """
@@ -73,7 +108,7 @@ class SkeletonAnimation:
             s_interp = s0 * (1.0 - t) + s1 * t
 
         # 3. Calcul du FK pour cette pose unique
-        return self._compute_fk_single_frame(p_interp, r_interp, s_interp)
+        return self._compute_fk_single_frame(p_interp, r_interp, s_interp, True)
 
     def _fast_nlerp_vectorized(self, q0, q1, t):
         """
@@ -101,7 +136,7 @@ class SkeletonAnimation:
         norm = np.linalg.norm(qt, axis=1, keepdims=True)
         return qt / norm
 
-    def _compute_fk_single_frame(self, positions, rotations, scales=None):
+    def _compute_fk_single_frame(self, positions, rotations, scales=None, local=False):
         """
         Calcule les matrices globales pour UNE seule frame.
         positions: (Bones, 3)
@@ -144,6 +179,9 @@ class SkeletonAnimation:
 
         # Translation
         local_m[:, :3, 3] = positions
+
+        if (local) :
+            return local_m
 
         # --- Propagation FK ---
         # Note: On ne peut pas vectoriser la hiérarchie elle-même (dépendance de données),
