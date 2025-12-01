@@ -62,7 +62,8 @@ class AnimationPlayer:
         """
         # Appel à la nouvelle méthode temps réel
         # loop=True/False selon la config du player
-        matrices = self.anim.get_pose_at_time(self.current_time, loop=self.loop)
+        # matrices = self.anim.get_pose_at_time(self.current_time, loop=self.loop)
+        matrices = self.anim.get_pose_at_time_numba(self.current_time, loop=self.loop)
 
         if matrices is None:
             return b""
