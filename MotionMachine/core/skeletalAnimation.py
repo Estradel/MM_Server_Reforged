@@ -4,6 +4,9 @@ import numpy as np
 from numba import njit, prange
 from numpy._typing import NDArray
 
+from MotionMachine.math.common import nlerp_jit, lerp_jit
+
+
 @njit(fastmath=False, parallel=False)
 def fast_nlerp_vectorized(q0, q1, t):
     """
@@ -11,6 +14,9 @@ def fast_nlerp_vectorized(q0, q1, t):
     q0, q1 : tableaux (N, 4)
     t      : float (scalaire)
     """
+
+    # ! Faster than nlerp_jit due to manual unrolling and optimizations
+
     nb_bone = q0.shape[0]
     result = np.empty((nb_bone, 4), dtype=np.float64)
 
@@ -52,60 +58,6 @@ def fast_nlerp_vectorized(q0, q1, t):
         result[i, 3] = rw * inv_len
 
     return result
-
-@njit(fastmath=False, parallel=False)
-def compute_fk_single_frame(positions, rotations, scales, bone_parents, local=True):
-    """
-    Calcule les matrices globales pour UNE seule frame.
-    """
-    num_bones = positions.shape[0]
-
-    X, Y, Z, W = rotations[:, 0], rotations[:, 1], rotations[:, 2], rotations[:, 3]
-
-    xx, yy, zz = X*X, Y*Y, Z*Z
-    xy, xz, yz = X*Y, X*Z, Y*Z
-    wx, wy, wz = W*X, W*Y, W*Z
-
-    # Matrice Locale
-    local_m = np.zeros((num_bones, 4, 4), dtype=np.float32)
-    local_m[:, 3, 3] = 1.0
-
-    # Rotation
-    local_m[:, 0, 0] = 1.0 - 2.0 * (yy + zz)
-    local_m[:, 0, 1] = 2.0 * (xy - wz)
-    local_m[:, 0, 2] = 2.0 * (xz + wy)
-
-    local_m[:, 1, 0] = 2.0 * (xy + wz)
-    local_m[:, 1, 1] = 1.0 - 2.0 * (xx + zz)
-    local_m[:, 1, 2] = 2.0 * (yz - wx)
-
-    local_m[:, 2, 0] = 2.0 * (xz - wy)
-    local_m[:, 2, 1] = 2.0 * (yz + wx)
-    local_m[:, 2, 2] = 1.0 - 2.0 * (xx + yy)
-
-    # Scale
-    if scales is not None:
-        local_m[:, :3, 0] *= scales[:, 0:1]
-        local_m[:, :3, 1] *= scales[:, 1:2]
-        local_m[:, :3, 2] *= scales[:, 2:3]
-
-    # Translation
-    local_m[:, :3, 3] = positions
-
-    if local:
-        return local_m
-
-    # Propagation FK
-    global_m = np.zeros((num_bones, 4, 4), dtype=np.float32)
-
-    for i in range(num_bones):
-        parent_idx = bone_parents[i]
-        if parent_idx == -1:
-            global_m[i] = local_m[i]
-        else:
-            global_m[i] = global_m[parent_idx] @ local_m[i]
-
-    return global_m
 
 @njit(parallel=False, fastmath=False)
 def compute_fk_fast(positions, rotations, scales, bone_parents, local=True):
@@ -212,8 +164,10 @@ def get_pose_at_time_numba(local_positions, local_rotations, local_scales,
         t = 0.0
 
     # Interpolation
-    p_interp = local_positions[idx0] * (1.0 - t) + local_positions[idx1] * t
-    r_interp = fast_nlerp_vectorized(local_rotations[idx0], local_rotations[idx1], t)
+    # p_interp = local_positions[idx0] * (1.0 - t) + local_positions[idx1] * t
+    p_interp = lerp_jit(local_positions[idx0], local_positions[idx1], t)
+    # r_interp = fast_nlerp_vectorized(local_rotations[idx0], local_rotations[idx1], t)
+    r_interp = nlerp_jit(local_rotations[idx0], local_rotations[idx1], t)
 
     s_interp = None
     if local_scales is not None:
@@ -222,116 +176,6 @@ def get_pose_at_time_numba(local_positions, local_rotations, local_scales,
     return compute_fk_fast(p_interp, r_interp, s_interp, bone_parents, local)
     # return compute_fk_single_frame(p_interp, r_interp, s_interp, bone_parents, local)
 
-@njit(parallel=False, fastmath=False)
-def interpolate_frames_numba(pos_frames, rot_frames, scl_frames, idx0, idx1, t):
-    """
-    Interpole positions, rotations et échelles entre deux frames.
-    Retourne les tableaux interpolés (N, 3) et (N, 4).
-    """
-    n_bones = pos_frames.shape[1]
-
-    # Allocation des résultats temporaires
-    # float32 est vital pour la vitesse (SIMD AVX)
-    p_out = np.empty((n_bones, 3), dtype=np.float32)
-    r_out = np.empty((n_bones, 4), dtype=np.float32)
-    s_out = np.empty((n_bones, 3), dtype=np.float32)
-
-    # Vérifier si scl_frames est None
-    has_scale = scl_frames is not None
-
-    # --- BOUCLE PARALLÈLE ---
-    for i in prange(n_bones):
-        # 1. Position LERP
-        # p = p0 * (1-t) + p1 * t
-        p_out[i, 0] = pos_frames[idx0, i, 0] * (1-t) + pos_frames[idx1, i, 0] * t
-        p_out[i, 1] = pos_frames[idx0, i, 1] * (1-t) + pos_frames[idx1, i, 1] * t
-        p_out[i, 2] = pos_frames[idx0, i, 2] * (1-t) + pos_frames[idx1, i, 2] * t
-
-        # 2. Rotation NLERP (Intégré pour performance)
-        # Lecture des quaternions
-        q0_x, q0_y, q0_z, q0_w = rot_frames[idx0, i]
-        q1_x, q1_y, q1_z, q1_w = rot_frames[idx1, i]
-
-        # Produit scalaire
-        dot = q0_x*q1_x + q0_y*q1_y + q0_z*q1_z + q0_w*q1_w
-
-        # Shortest Path
-        sign = 1.0
-        if dot < 0.0:
-            sign = -1.0
-
-        # Interpolation
-        qx = q0_x * (1.0 - t) + q1_x * (t * sign)
-        qy = q0_y * (1.0 - t) + q1_y * (t * sign)
-        qz = q0_z * (1.0 - t) + q1_z * (t * sign)
-        qw = q0_w * (1.0 - t) + q1_w * (t * sign)
-
-        # Normalisation (Inverse Sqrt rapide)
-        inv_norm = 1.0 / np.sqrt(qx*qx + qy*qy + qz*qz + qw*qw + 1e-8)
-        r_out[i, 0] = qx * inv_norm
-        r_out[i, 1] = qy * inv_norm
-        r_out[i, 2] = qz * inv_norm
-        r_out[i, 3] = qw * inv_norm
-
-        # 3. Scale LERP avec gestion de None
-        if has_scale:
-            s_out[i, 0] = scl_frames[idx0, i, 0] * (1-t) + scl_frames[idx1, i, 0] * t
-            s_out[i, 1] = scl_frames[idx0, i, 1] * (1-t) + scl_frames[idx1, i, 1] * t
-            s_out[i, 2] = scl_frames[idx0, i, 2] * (1-t) + scl_frames[idx1, i, 2] * t
-        else:
-            s_out[i, 0] = 1.0
-            s_out[i, 1] = 1.0
-            s_out[i, 2] = 1.0
-
-    return p_out, r_out, s_out
-
-@njit(parallel=False, fastmath=False)
-def get_pose_at_time_fast(local_positions, local_rotations, local_scales,
-                          bone_parents, frame_time, time_sec, loop=True):
-    """
-    Fonction principale (Orchestrateur).
-    1. Calcule le temps.
-    2. Interpole (Parallel).
-    3. Calcule la FK (Parallel + Serial).
-    """
-    num_frames = local_positions.shape[0]
-
-    # --- 1. Gestion du Temps ---
-    # float division
-    frame_float = time_sec / frame_time
-
-    idx0 = 0
-    idx1 = 0
-
-    if loop:
-        # Modulo optimisé pour float
-        frame_float = frame_float % num_frames
-        idx0 = int(frame_float)
-        idx1 = (idx0 + 1) % num_frames
-    else:
-        # Clamp
-        frame_idx = int(frame_float)
-        if frame_idx >= num_frames - 1:
-            idx0 = num_frames - 1
-            idx1 = num_frames - 1
-            frame_float = float(idx0) # t sera 0
-        else:
-            idx0 = frame_idx
-            idx1 = idx0 + 1
-
-    t = frame_float - int(frame_float)
-
-    # Cas limite t très petit
-    if idx0 == idx1:
-        t = 0.0
-
-    # --- 2. Interpolation (Le gros du travail) ---
-    # Note : On force l'envoi de local_scales. S'il est None en Python,
-    # il faut envoyer un tableau de 1.0 avant d'appeler cette fonction.
-    p_now, r_now, s_now = interpolate_frames_numba(local_positions, local_rotations, local_scales, idx0, idx1, t)
-
-    # --- 3. Calcul FK (Réutilisation de votre fonction précédente) ---
-    return compute_fk_fast(p_now, r_now, s_now, bone_parents)
 
 class SkeletonAnimation:
     """
@@ -406,6 +250,7 @@ class SkeletonAnimation:
             time_sec,
             loop        )
 
+    @njit(fastmath=False, parallel=False)
     def get_pose_at_time(self, time_sec, loop=True, local=True):
         """
         Calcule la pose globale interpolée à un instant t précis.
@@ -439,48 +284,26 @@ class SkeletonAnimation:
         # Position : Lerp (Linear Interpolation)
         p0 = self.local_positions[idx0]
         p1 = self.local_positions[idx1]
-        p_interp = p0 * (1.0 - t) + p1 * t
+        # p_interp = p0 * (1.0 - t) + p1 * t
+        p_interp = lerp_jit(p0, p1, t)
 
         # Rotation : Nlerp (Normalized Linear Interpolation) - Rapide et stable
         r0 = self.local_rotations[idx0]
         r1 = self.local_rotations[idx1]
-        r_interp = self._fast_nlerp_vectorized(r0, r1, t)
+        # r_interp = self._fast_nlerp_vectorized(r0, r1, t)
+        r_interp = nlerp_jit(r0, r1, t)
 
         # Scale : Lerp (si présent)
         s_interp = None
         if self.local_scales is not None:
             s0 = self.local_scales[idx0]
             s1 = self.local_scales[idx1]
-            s_interp = s0 * (1.0 - t) + s1 * t
+            # s_interp = s0 * (1.0 - t) + s1 * t
+            s_interp = lerp_jit(s0, s1, t)
 
         # 3. Calcul du FK pour cette pose unique
-        return self._compute_fk_single_frame(p_interp, r_interp, s_interp, local)
-
-    def _fast_nlerp_vectorized(self, q0, q1, t):
-        """
-        Interpolation linéaire normalisée de quaternions (Bones, 4).
-        Gère le "Shortest Path" (évite que la rotation fasse le tour complet).
-        """
-        # Produit scalaire pour vérifier l'orientation (Shortest Path)
-        # sum(q0 * q1, axis=1)
-        dot = np.sum(q0 * q1, axis=1)
-
-        # Si le dot product est négatif, on inverse q1 pour prendre le chemin court
-        # On utilise np.where pour le faire de manière vectorisée sans 'if'
-        # q1_corrected = q1 * sign(dot) (approximatif)
-
-        # Masque booléen pour les inversions
-        mask = dot < 0.0
-        q1_adj = q1.copy()
-        q1_adj[mask] = -q1[mask]
-
-        # Interpolation linéaire
-        qt = q0 * (1.0 - t) + q1_adj * t
-
-        # Normalisation (Essentiel pour que ce soit une rotation valide)
-        # Norme Euclidienne
-        norm = np.linalg.norm(qt, axis=1, keepdims=True)
-        return qt / norm
+        # return self._compute_fk_single_frame(p_interp, r_interp, s_interp, local)
+        return compute_fk_fast(p_interp, r_interp, s_interp, self.bone_parents, local)
 
     def _compute_fk_single_frame(self, positions, rotations, scales=None, local=False):
         """

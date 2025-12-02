@@ -29,7 +29,7 @@ def lerp_vec3_gu(v1, v2, t, res):
 # ---------------------------------------------------------
 # 3. Version @njit (Performance Maximale "Bare Metal")
 # ---------------------------------------------------------
-@njit(parallel=False, fastmath=True)
+@njit(parallel=False, fastmath=False)
 def lerp_vec3_jit(v1, v2, t):
     # v1.shape est (N, 3)
     n = v1.shape[0]
