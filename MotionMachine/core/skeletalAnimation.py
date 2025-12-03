@@ -1,65 +1,12 @@
 from pickle import FALSE
 
 import numpy as np
-from numba import njit, prange
+from numba import njit, prange, float32, boolean, int32
 from numpy._typing import NDArray
 
-from MotionMachine.math.common import nlerp_jit, lerp_jit
+from MotionMachine.math.common import nlerp_quat_jit, lerp_vec3_jit
 
-
-@njit(fastmath=False, parallel=False)
-def fast_nlerp_vectorized(q0, q1, t):
-    """
-    Interpolation NLERP optimisée pour Numba (CPU multi-cœur).
-    q0, q1 : tableaux (N, 4)
-    t      : float (scalaire)
-    """
-
-    # ! Faster than nlerp_jit due to manual unrolling and optimizations
-
-    nb_bone = q0.shape[0]
-    result = np.empty((nb_bone, 4), dtype=np.float64)
-
-    # Numba parallélise cette boucle automatiquement
-    for i in prange(nb_bone):
-        # 1. Calcul du produit scalaire (manuellement)
-        # On déroule la boucle sur les 4 composantes pour la vitesse
-        dot = (q0[i, 0] * q1[i, 0] +
-               q0[i, 1] * q1[i, 1] +
-               q0[i, 2] * q1[i, 2] +
-               q0[i, 3] * q1[i, 3])
-
-        # 2. Gestion du Shortest Path
-        # Si dot < 0, on inverse le signe de t pour q1
-        t_val = t
-        if dot < 0.0:
-            t_val = -t
-
-        # 3. Interpolation Linéaire
-        # result = q0 * (1-t) + q1 * t_sign
-        f0 = 1.0 - t
-
-        # On calcule les composantes interpolées temporaires
-        rx = q0[i, 0] * f0 + q1[i, 0] * t_val
-        ry = q0[i, 1] * f0 + q1[i, 1] * t_val
-        rz = q0[i, 2] * f0 + q1[i, 2] * t_val
-        rw = q0[i, 3] * f0 + q1[i, 3] * t_val
-
-        # 4. Normalisation (manuelle)
-        sq_norm = rx*rx + ry*ry + rz*rz + rw*rw
-
-        # Inverse sqrt est souvent plus rapide qu'une division
-        # Ajout d'epsilon pour sécurité
-        inv_len = 1.0 / np.sqrt(sq_norm + 1e-8)
-
-        result[i, 0] = rx * inv_len
-        result[i, 1] = ry * inv_len
-        result[i, 2] = rz * inv_len
-        result[i, 3] = rw * inv_len
-
-    return result
-
-@njit(parallel=False, fastmath=False)
+@njit(float32[:,:,:](float32[:,:], float32[:,:], float32[:,:], int32[:], boolean), parallel=False, fastmath=False)
 def compute_fk_fast(positions, rotations, scales, bone_parents, local=True):
     """
     Calcule la FK complète (Local + Global) optimisée Numba.
@@ -73,20 +20,13 @@ def compute_fk_fast(positions, rotations, scales, bone_parents, local=True):
     local_m = np.zeros((n, 4, 4), dtype=np.float32)
     global_m = np.zeros((n, 4, 4), dtype=np.float32)
 
-    # Vérifier si scales est None en dehors de la boucle
-    has_scale = scales is not None
-
     # --- PHASE 1 : Calcul des Matrices Locales (Parallélisé) ---
     # Cette partie est totalement indépendante pour chaque os -> Multithreading
     for i in prange(n):
         # Récupération des quaternions (x, y, z, w)
         qx, qy, qz, qw = rotations[i, 0], rotations[i, 1], rotations[i, 2], rotations[i, 3]
 
-        # Récupération du scale (avec valeur par défaut si None)
-        if has_scale:
-            sx, sy, sz = scales[i, 0], scales[i, 1], scales[i, 2]
-        else:
-            sx, sy, sz = 1.0, 1.0, 1.0
+        sx, sy, sz = scales[i, 0], scales[i, 1], scales[i, 2]
 
         # Calculs intermédiaires quaternion
         xx, yy, zz = qx*qx, qy*qy, qz*qz
@@ -128,16 +68,12 @@ def compute_fk_fast(positions, rotations, scales, bone_parents, local=True):
             # Pas de parent (Root) : Global = Local
             global_m[i] = local_m[i]
         else:
-            # Enfant : Global = Global_Parent @ Local_Enfant
-            # Multiplication matricielle manuelle (unroll) pour max perf
-            # sans appel de fonction externe.
+        # Enfant : Global = Global_Parent @ Local_Enfant
             for r in range(4):
                 for c in range(4):
-                    acc = 0.0
+                    global_m[i, r, c] = np.float32(0.0)
                     for k in range(4):
-                        # parent est déjà calculé car i > parent (généralement)
-                        acc += global_m[parent, r, k] * local_m[i, k, c]
-                    global_m[i, r, c] = acc
+                        global_m[i, r, c] = global_m[i, r, c] + global_m[parent, r, k] * local_m[i, k, c]
 
     return global_m
 
@@ -164,14 +100,14 @@ def get_pose_at_time_numba(local_positions, local_rotations, local_scales,
         t = 0.0
 
     # Interpolation
-    # p_interp = local_positions[idx0] * (1.0 - t) + local_positions[idx1] * t
-    p_interp = lerp_jit(local_positions[idx0], local_positions[idx1], t)
-    # r_interp = fast_nlerp_vectorized(local_rotations[idx0], local_rotations[idx1], t)
-    r_interp = nlerp_jit(local_rotations[idx0], local_rotations[idx1], t)
+    p_interp = lerp_vec3_jit(local_positions[idx0], local_positions[idx1], t)
+    r_interp = nlerp_quat_jit(local_rotations[idx0], local_rotations[idx1], t)
 
     s_interp = None
     if local_scales is not None:
         s_interp = local_scales[idx0] * (1.0 - t) + local_scales[idx1] * t
+    else :
+        s_interp = np.ones_like(p_interp, dtype=np.float32)
 
     return compute_fk_fast(p_interp, r_interp, s_interp, bone_parents, local)
     # return compute_fk_single_frame(p_interp, r_interp, s_interp, bone_parents, local)
@@ -250,7 +186,6 @@ class SkeletonAnimation:
             time_sec,
             loop        )
 
-    @njit(fastmath=False, parallel=False)
     def get_pose_at_time(self, time_sec, loop=True, local=True):
         """
         Calcule la pose globale interpolée à un instant t précis.
@@ -285,13 +220,13 @@ class SkeletonAnimation:
         p0 = self.local_positions[idx0]
         p1 = self.local_positions[idx1]
         # p_interp = p0 * (1.0 - t) + p1 * t
-        p_interp = lerp_jit(p0, p1, t)
+        p_interp = lerp_vec3_jit(p0, p1, t)
 
         # Rotation : Nlerp (Normalized Linear Interpolation) - Rapide et stable
         r0 = self.local_rotations[idx0]
         r1 = self.local_rotations[idx1]
         # r_interp = self._fast_nlerp_vectorized(r0, r1, t)
-        r_interp = nlerp_jit(r0, r1, t)
+        r_interp = nlerp_quat_jit(r0, r1, t)
 
         # Scale : Lerp (si présent)
         s_interp = None
@@ -299,7 +234,7 @@ class SkeletonAnimation:
             s0 = self.local_scales[idx0]
             s1 = self.local_scales[idx1]
             # s_interp = s0 * (1.0 - t) + s1 * t
-            s_interp = lerp_jit(s0, s1, t)
+            s_interp = lerp_vec3_jit(s0, s1, t)
 
         # 3. Calcul du FK pour cette pose unique
         # return self._compute_fk_single_frame(p_interp, r_interp, s_interp, local)

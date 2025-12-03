@@ -2,9 +2,8 @@ import numpy as np
 from numba import njit, prange, float64, float32
 
 
-@njit([float64[:,:](float64[:,:], float64[:,:], float64),
-       float32[:,:](float32[:,:], float32[:,:], float32)],parallel=False, fastmath=False)
-def lerp_jit(v1, v2, t):
+@njit(float32[:,:](float32[:,:], float32[:,:], float32),parallel=False, fastmath=False)
+def lerp_vec3_jit(v1, v2, t):
     # v1.shape est (N, 3)
     n = v1.shape[0]
     m = v1.shape[1] # Devrait être 3
@@ -16,53 +15,58 @@ def lerp_jit(v1, v2, t):
 
     # Boucle parallèle sur les vecteurs (lignes)
     for i in prange(n):
-        # Boucle sur les composantes (x, y, z)
-        # Comme m=3, c'est minuscule, le CPU va vectoriser ça (SIMD)
-        for k in range(m):
-            res[i, k] = t_inv * v1[i, k] + t * v2[i, k]
+        res[i, 0] = t_inv * v1[i, 0] + t * v2[i, 2]
+        res[i, 1] = t_inv * v1[i, 1] + t * v2[i, 2]
+        res[i, 2] = t_inv * v1[i, 2] + t * v2[i, 2]
 
     return res
 
-@njit([float64[:,:](float64[:,:], float64[:,:], float64),
-       float32[:,:](float32[:,:], float32[:,:], float32)],parallel=False, fastmath=False)
-def nlerp_jit(q1, q2, t):
-    n = q1.shape[0]
-    # On alloue le tableau de résultat une seule fois
-    res = np.empty((n, 4), dtype=q1.dtype)
+@njit(float32[:,:](float32[:,:], float32[:,:], float32),fastmath=False, parallel=False)
+def nlerp_quat_jit(q0, q1, t):
+    """
+    Interpolation NLERP optimisée pour Numba (CPU multi-cœur).
+    q0, q1 : tableaux (N, 4)
+    t      : float (scalaire)
+    """
 
-    t_sub = 1.0 - t
+    nb_bone = q0.shape[0]
+    result = np.empty((nb_bone, 4), dtype=q0.dtype)
 
-    # Boucle parallèle sur tous les quaternions
-    for i in prange(n):
+    # Numba parallélise cette boucle automatiquement
+    for i in prange(nb_bone):
+        # 1. Calcul du produit scalaire (manuellement)
+        # On déroule la boucle sur les 4 composantes pour la vitesse
+        dot = (q0[i, 0] * q1[i, 0] +
+               q0[i, 1] * q1[i, 1] +
+               q0[i, 2] * q1[i, 2] +
+               q0[i, 3] * q1[i, 3])
 
-        # --- A. Produit scalaire manuel ---
-        dot = 0.0
-        for k in range(4):
-            dot += q1[i, k] * q2[i, k]
-
-        # --- B. Choix du signe ---
-        sign = 1.0
+        # 2. Gestion du Shortest Path
+        # Si dot < 0, on inverse le signe de t pour q1
+        t_val = t
         if dot < 0.0:
-            sign = -1.0
+            t_val = -t
 
-        # --- C. LERP + Calcul Norme (combinés) ---
-        # On calcule la valeur ET on accumule le carré de la norme dans la même boucle
-        norm_sq = 0.0
-        for k in range(4):
-            # Formule : ((1-t) * q1 * sign) + (t * q2)
-            val = (t_sub * q1[i, k] * sign) + (t * q2[i, k])
-            res[i, k] = val
-            norm_sq += val * val
+        # 3. Interpolation Linéaire
+        # result = q0 * (1-t) + q1 * t_sign
+        f0 = 1.0 - t
 
-        # --- D. Normalisation ---
-        # On évite la division par zéro avec une sécurité minimale
-        if norm_sq > 0.0:
-            inv_norm = 1.0 / np.sqrt(norm_sq)
-            for k in range(4):
-                res[i, k] *= inv_norm
-        else:
-            # Cas rare (vecteur nul), on remet l'identité ou 0
-            for k in range(4):
-                res[i, k] = 0.0
+        # On calcule les composantes interpolées temporaires
+        rx = q0[i, 0] * f0 + q1[i, 0] * t_val
+        ry = q0[i, 1] * f0 + q1[i, 1] * t_val
+        rz = q0[i, 2] * f0 + q1[i, 2] * t_val
+        rw = q0[i, 3] * f0 + q1[i, 3] * t_val
 
-    return res
+        # 4. Normalisation (manuelle)
+        sq_norm = rx*rx + ry*ry + rz*rz + rw*rw
+
+        # Inverse sqrt est souvent plus rapide qu'une division
+        # Ajout d'epsilon pour sécurité
+        inv_len = 1.0 / np.sqrt(sq_norm + 1e-8)
+
+        result[i, 0] = rx * inv_len
+        result[i, 1] = ry * inv_len
+        result[i, 2] = rz * inv_len
+        result[i, 3] = rw * inv_len
+
+    return result
