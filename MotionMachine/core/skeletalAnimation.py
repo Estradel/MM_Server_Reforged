@@ -1,12 +1,12 @@
 from pickle import FALSE
 
 import numpy as np
-from numba import njit, prange, float32, boolean, int32
+from numba import njit, prange, float32, boolean, int32, float64
 from numpy._typing import NDArray
 
 from MotionMachine.math.common import nlerp_quat_jit, lerp_vec3_jit
 
-@njit(float32[:,:,:](float32[:,:], float32[:,:], float32[:,:], int32[:], boolean), parallel=False, fastmath=False)
+@njit(float64[:,:,:](float64[:,:], float64[:,:], float64[:,:], int32[:], boolean), parallel=False, fastmath=True)
 def compute_fk_fast(positions, rotations, scales, bone_parents, local=True):
     """
     Calcule la FK complète (Local + Global) optimisée Numba.
@@ -17,8 +17,8 @@ def compute_fk_fast(positions, rotations, scales, bone_parents, local=True):
     # 1. ALLOCATION INTERNE (Plus pratique pour l'utilisateur)
     # On crée les buffers temporaires ici.
     # On utilise float32 car c'est le standard graphique (2x plus rapide que float64).
-    local_m = np.zeros((n, 4, 4), dtype=np.float32)
-    global_m = np.zeros((n, 4, 4), dtype=np.float32)
+    local_m = np.zeros((n, 4, 4), dtype=np.float64)
+    global_m = np.zeros((n, 4, 4), dtype=np.float64)
 
     # --- PHASE 1 : Calcul des Matrices Locales (Parallélisé) ---
     # Cette partie est totalement indépendante pour chaque os -> Multithreading
@@ -77,7 +77,7 @@ def compute_fk_fast(positions, rotations, scales, bone_parents, local=True):
 
     return global_m
 
-@njit(fastmath=False, parallel=False)
+@njit(fastmath=True, parallel=False)
 def get_pose_at_time_numba(local_positions, local_rotations, local_scales,
                            bone_parents, frame_time, time_sec, loop=True, local=True):
     """
@@ -107,7 +107,7 @@ def get_pose_at_time_numba(local_positions, local_rotations, local_scales,
     if local_scales is not None:
         s_interp = local_scales[idx0] * (1.0 - t) + local_scales[idx1] * t
     else :
-        s_interp = np.ones_like(p_interp, dtype=np.float32)
+        s_interp = np.ones_like(p_interp, dtype=np.float64)
 
     return compute_fk_fast(p_interp, r_interp, s_interp, bone_parents, local)
     # return compute_fk_single_frame(p_interp, r_interp, s_interp, bone_parents, local)
@@ -123,14 +123,14 @@ class SkeletonAnimation:
 
         # --- Ajout : Stockage de la Bind Pose (Pose de repos) ---
         # Ces données définissent la forme du squelette sans animation
-        self.rest_positions = None # (B, 3)
-        self.rest_rotations = None # (B, 4) - Quaternions
-        self.rest_scales = None    # (B, 3)
+        self.rest_positions : NDArray[np.float64] = None # (B, 3)
+        self.rest_rotations : NDArray[np.float64] = None # (B, 4) - Quaternions
+        self.rest_scales : NDArray[np.float64] = None    # (B, 3)
 
         # Données d'animation (Frames, Bones, ...)
-        self.local_positions = None # (F, B, 3)
-        self.local_rotations = None # (F, B, 4) - Quaternions (x, y, z, w)
-        self.local_scales = None    # (F, B, 3) - Optionnel
+        self.local_positions : NDArray[np.float64] = None # (F, B, 3)
+        self.local_rotations : NDArray[np.float64] = None # (F, B, 4) - Quaternions (x, y, z, w)
+        self.local_scales : NDArray[np.float64] = None    # (F, B, 3) - Optionnel
 
         self.frame_time = 0.033
 
@@ -184,7 +184,8 @@ class SkeletonAnimation:
             self.bone_parents,
             self.frame_time,
             time_sec,
-            loop        )
+            loop,
+            local)
 
     def get_pose_at_time(self, time_sec, loop=True, local=True):
         """

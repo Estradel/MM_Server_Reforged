@@ -47,9 +47,9 @@ class FastBVH(SkeletonAnimation):
         num_bones = len(flat_joints) # len(root.layout())
 
         # Initialisation des tableaux de Bind Pose
-        self.rest_positions = np.zeros((num_bones, 3), dtype=np.float32)
-        self.rest_rotations = np.zeros((num_bones, 4), dtype=np.float32)
-        self.rest_scales = np.ones((num_bones, 3), dtype=np.float32)
+        self.rest_positions = np.zeros((num_bones, 3), dtype=np.float64)
+        self.rest_rotations = np.zeros((num_bones, 4), dtype=np.float64)
+        self.rest_scales = np.ones((num_bones, 3), dtype=np.float64)
 
         for i, joint in enumerate(flat_joints):
             # BVHio nous donne la RestPose (Offset par rapport au parent)
@@ -60,8 +60,9 @@ class FastBVH(SkeletonAnimation):
             self.rest_rotations[i] = [rest_rot.x, rest_rot.y, rest_rot.z, rest_rot.w]
             # BVH n'a généralement pas de scale, on laisse à 1.0
 
-        self.local_positions = np.zeros((num_frames, num_bones, 3), dtype=np.float32)
-        self.local_rotations = np.zeros((num_frames, num_bones, 4), dtype=np.float32)
+        self.local_positions = np.zeros((num_frames, num_bones, 3), dtype=np.float64)
+        self.local_rotations = np.zeros((num_frames, num_bones, 4), dtype=np.float64)
+        self.local_scales = np.ones_like(self.local_positions, dtype=np.float64)
 
         for i, joint in enumerate(flat_joints):
             if not joint.Keyframes: continue

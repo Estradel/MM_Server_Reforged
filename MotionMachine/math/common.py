@@ -2,7 +2,7 @@ import numpy as np
 from numba import njit, prange, float64, float32
 
 
-@njit(float32[:,:](float32[:,:], float32[:,:], float32),parallel=False, fastmath=False)
+@njit(float64[:,:](float64[:,:], float64[:,:], float64),parallel=False, fastmath=True, inline="always")
 def lerp_vec3_jit(v1, v2, t):
     # v1.shape est (N, 3)
     n = v1.shape[0]
@@ -21,7 +21,7 @@ def lerp_vec3_jit(v1, v2, t):
 
     return res
 
-@njit(float32[:,:](float32[:,:], float32[:,:], float32),fastmath=False, parallel=False)
+@njit(float64[:,:](float64[:,:], float64[:,:], float64), parallel=False, fastmath=True, inline="always")
 def nlerp_quat_jit(q0, q1, t):
     """
     Interpolation NLERP optimisée pour Numba (CPU multi-cœur).
